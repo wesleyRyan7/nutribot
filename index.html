@@ -1,43 +1,120 @@
-const express = require('express');
-const cors = require('cors');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-require('dotenv').config();
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>NutriBot</title>
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-app.post('/analisar', async (req, res) => {
-    try {
-        const { imageBase64 } = req.body;
-        if (!imageBase64) return res.status(400).json({ erro: "Faltou a imagem!" });
-
-        const cleanBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
-
-        // FORÇANDO A VERSÃO V1 PARA EVITAR O 404
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash" 
-        }, { apiVersion: 'v1' });
-
-        const result = await model.generateContent([
-            "Descreva os alimentos e calorias desta imagem.",
-            {
-                inlineData: {
-                    data: cleanBase64,
-                    mimeType: "image/jpeg"
-                }
-            }
-        ]);
-
-        const response = await result.response;
-        res.json({ resposta: response.text() });
-
-    } catch (error) {
-        console.error("ERRO:", error.message);
-        res.status(500).json({ erro: error.message });
+  <style>
+    body {
+      font-family: Arial;
+      background: #0f172a;
+      color: white;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
     }
+
+    .container {
+      background: #1e293b;
+      padding: 30px;
+      border-radius: 12px;
+      width: 400px;
+      text-align: center;
+    }
+
+    input {
+      margin: 15px 0;
+    }
+
+    button {
+      background: #22c55e;
+      border: none;
+      padding: 10px 20px;
+      color: white;
+      cursor: pointer;
+      border-radius: 8px;
+      font-weight: bold;
+    }
+
+    img {
+      max-width: 100%;
+      margin-top: 15px;
+      border-radius: 10px;
+    }
+
+    .resposta {
+      margin-top: 20px;
+      text-align: left;
+      background: #020617;
+      padding: 15px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>🍽️ NutriBot</h2>
+
+  <input type="file" id="fileInput" accept="image/*">
+  <br>
+
+  <button onclick="enviar()">Analisar</button>
+
+  <img id="preview" />
+
+  <div class="resposta" id="resposta"></div>
+</div>
+
+<script>
+let base64Image = "";
+
+document.getElementById("fileInput").addEventListener("change", function(event) {
+  const file = event.target.files[0];
+
+  if (!file) return;
+
+  const reader = new FileReader();
+
+  reader.onload = function(e) {
+    base64Image = e.target.result;
+    document.getElementById("preview").src = base64Image;
+  };
+
+  reader.readAsDataURL(file);
 });
 
-app.listen(3000, () => console.log("NutriBot online na 3000"));
+async function enviar() {
+  if (!base64Image) {
+    alert("Selecione uma imagem primeiro!");
+    return;
+  }
+
+  document.getElementById("resposta").innerText = "Analisando...";
+
+  try {
+    const response = await fetch("http://localhost:3000/analisar", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        imageBase64: base64Image
+      })
+    });
+
+    const data = await response.json();
+
+    document.getElementById("resposta").innerText = data.resposta || data.erro;
+
+  } catch (error) {
+    document.getElementById("resposta").innerText = "Erro ao conectar com servidor";
+  }
+}
+</script>
+
+</body>
+</html>
