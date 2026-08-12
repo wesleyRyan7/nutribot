@@ -1,414 +1,247 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-const { Pool } = require('pg');
-require('dotenv').config();
+﻿const express = require("express");
+const axios = require("axios");
+const cors = require("cors");
+const { Pool } = require("pg");
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: "50mb" }));
 
-const db = new Pool({
-    connectionString: 'postgresql://postgres:nutribot123@localhost:5432/evolution_api'
-});
-
-// ==================== BANCO ====================
+const db = new Pool({ connectionString: "postgresql://postgres:nutribot123@localhost:5432/evolution_api" });
+const INSTANCE = "nutribot-teste";
+const API_KEY = process.env.EVOLUTION_API_KEY || "intelbraS12";
 
 async function enviarMensagem(numero, mensagem) {
-    await axios.post(
-        'http://localhost:8080/message/sendText/nutribot-teste',
-        { number: numero, text: mensagem },
-        { headers: { apikey: process.env.EVOLUTION_API_KEY || 'intelbraS12', 'Content-Type': 'application/json' } }
-    );
+    try {
+        await axios.post("http://localhost:8080/message/sendText/" + INSTANCE, { number: numero, text: mensagem }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } });
+    } catch (e) { console.error("Erro envio:", e.message); }
+}
+
+async function enviarDigitando(numero) {
+    try {
+        await axios.post("http://localhost:8080/chat/presence/" + INSTANCE, { number: numero, presence: "composing", delay: 2000 }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } });
+        await new Promise(r => setTimeout(r, 2000));
+    } catch (e) {}
 }
 
 async function buscarUsuario(numero) {
-    const r = await db.query('SELECT * FROM usuarios WHERE numero = $1', [numero]);
+    const r = await db.query("SELECT * FROM usuarios WHERE numero = $1", [numero]);
     return r.rows[0] || null;
 }
 
 async function criarUsuario(numero) {
-    const r = await db.query('INSERT INTO usuarios (numero) VALUES ($1) RETURNING *', [numero]);
+    const r = await db.query("INSERT INTO usuarios (numero, estado, plano) VALUES ($1, 'apresentacao', 'trial') RETURNING *", [numero]);
     return r.rows[0];
 }
 
 async function atualizarUsuario(numero, dados) {
-    const campos = Object.keys(dados).map((k, i) => `${k} = $${i + 2}`).join(', ');
-    await db.query(`UPDATE usuarios SET ${campos} WHERE numero = $1`, [numero, ...Object.values(dados)]);
+    const campos = Object.keys(dados).map((k, i) => k + " = $" + (i + 2)).join(", ");
+    await db.query("UPDATE usuarios SET " + campos + " WHERE numero = $1", [numero, ...Object.values(dados)]);
 }
 
 async function salvarRefeicao(numero, refeicao, calorias, proteina, carboidratos, gordura) {
-    await db.query(
-        'INSERT INTO diario (numero, refeicao, calorias, proteina, carboidratos, gordura) VALUES ($1,$2,$3,$4,$5,$6)',
-        [numero, refeicao, calorias, proteina, carboidratos, gordura]
-    );
+    await db.query("INSERT INTO diario (numero, refeicao, calorias, proteina, carboidratos, gordura) VALUES ($1,$2,$3,$4,$5,$6)", [numero, refeicao, calorias, proteina, carboidratos, gordura]);
 }
 
 async function buscarDiarioHoje(numero) {
-    const r = await db.query(
-        'SELECT * FROM diario WHERE numero = $1 AND data = CURRENT_DATE ORDER BY criado_em',
-        [numero]
-    );
+    const r = await db.query("SELECT * FROM diario WHERE numero = $1 AND data = CURRENT_DATE ORDER BY criado_em", [numero]);
     return r.rows;
 }
 
 function calcularCalorias(peso, altura, objetivo) {
     const tmb = 10 * peso + 6.25 * altura - 5 * 30 + 5;
     const get = tmb * 1.4;
-    if (objetivo === 'emagrecer') return Math.round(get - 400);
-    if (objetivo === 'ganhar') return Math.round(get + 300);
+    if (objetivo === "emagrecer") return Math.round(get - 400);
+    if (objetivo === "ganhar") return Math.round(get + 300);
     return Math.round(get);
 }
 
 function verificarTrialAtivo(usuario) {
-    if (usuario.plano === 'premium') return true;
+    if (usuario.plano === "premium") return true;
     if (!usuario.trial_inicio) return false;
     const dias = (Date.now() - new Date(usuario.trial_inicio).getTime()) / (1000 * 60 * 60 * 24);
     return dias <= 4;
 }
 
-// ==================== IA ====================
+function getDados(usuario) {
+    try { return usuario.estado_dados ? JSON.parse(usuario.estado_dados) : {}; } catch { return {}; }
+}
 
-async function gerarPlanoCompleto(estado) {
-    const prompt = `Você é ${estado.apelido_bot}, assistente de nutrição direto e humano.
-
-Dados do usuário:
-- Nome: ${estado.nome}
-- Objetivo: ${estado.objetivo}
-- Peso: ${estado.peso}kg / Altura: ${estado.altura}cm
-- Meta calórica: ${estado.calorias} kcal/dia
-- Come em: ${estado.alimentacao_local}
-- Gosta de comer: ${estado.comida}
-- Restrições: ${estado.restricoes}
-- Rotina: ${estado.rotina}
-- Orçamento: R$${estado.orcamento} ${estado.frequencia_compras}
-- Frequência de compras: ${estado.frequencia_compras}
-
-Escreva em 3 mensagens separadas por ---SEPARADOR---
-
-Mensagem 1: boas vindas com nome, confirma objetivo e meta calórica de forma simples
-
-Mensagem 2: plano alimentar do dia com café, almoço, lanche e janta usando alimentos simples e acessíveis baseados no que a pessoa gosta e na realidade dela (empresa, casa, etc). Inclua lista de compras estimada pro orçamento informado
-
-Mensagem 3: plano de treino básico baseado na rotina e objetivo. Se trabalha em pé já conta como atividade. Seja realista e simples
-
-Regras de escrita:
-- linguagem humana e direta
-- use pq no lugar de porque
-- sem pontuação exagerada
-- blocos curtos
-- sem textos gigantes`;
-
-    const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
-        { model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }] },
-        { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' } }
-    );
-
-    return response.data.choices[0].message.content.split('---SEPARADOR---').map(m => m.trim());
+async function gerarPlano(usuario) {
+    const prompt = "Voce e " + (usuario.apelido_bot || "assistente de nutricao") + ", direto e humano.\n\nDados:\n- Nome: " + usuario.nome + "\n- Objetivo: " + usuario.objetivo + "\n- Peso: " + usuario.peso + "kg / Altura: " + usuario.altura + "cm\n- Meta: " + usuario.calorias_diarias + " kcal/dia\n- Come em: " + usuario.alimentacao_local + "\n- Gosta de: " + usuario.comida + "\n- Restricoes: " + usuario.restricoes + "\n- Rotina: " + usuario.rotina + "\n- Orcamento: R$" + usuario.orcamento + " " + usuario.frequencia_compras + "\n\nEscreva 3 mensagens separadas por ---SEP---\n1: boas vindas com nome objetivo e meta calorica simples\n2: plano alimentar do dia com almoco lanche jantar usando alimentos simples. Inclua lista de compras\n3: treino basico baseado na rotina e objetivo\n\nRegras: use pq no lugar de porque, sem pontuacao exagerada, blocos curtos";
+    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }] }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
+    return response.data.choices[0].message.content.split("---SEP---").map(m => m.trim()).filter(m => m);
 }
 
 async function analisarImagem(base64, mimeType, usuario) {
-    const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
-        {
-            model: 'gpt-4o-mini',
-            messages: [{
-                role: 'user',
-                content: [
-                    {
-                        type: 'text',
-                        text: `Você é ${usuario.apelido_bot || 'Wesley Nutricionista'}. Analise a refeição.
-Usuário: ${usuario.nome}, objetivo: ${usuario.objetivo}, meta: ${usuario.calorias_diarias} kcal/dia.
-
-Responda APENAS este JSON sem texto adicional:
-{
-  "refeicao": "descrição breve",
-  "calorias": numero,
-  "proteina": numero,
-  "carboidratos": numero,
-  "gordura": numero,
-  "mensagem": "análise curta e humana, use pq, sem pontuação exagerada"
-}`
-                    },
-                    { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
-                ]
-            }]
-        },
-        { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' } }
-    );
-
-    return JSON.parse(response.data.choices[0].message.content.replace(/```json|```/g, '').trim());
+    const prompt = "Voce e " + (usuario.apelido_bot || "assistente de nutricao") + ". Analise a refeicao. Usuario: " + usuario.nome + ", objetivo: " + usuario.objetivo + ", meta: " + usuario.calorias_diarias + " kcal/dia.\n\nResponda APENAS este JSON:\n{\"refeicao\": \"descricao breve\", \"calorias\": numero, \"proteina\": numero, \"carboidratos\": numero, \"gordura\": numero, \"mensagem\": \"analise curta e humana\"}";
+    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: "data:" + mimeType + ";base64," + base64 } }] }] }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
+    return JSON.parse(response.data.choices[0].message.content.replace(/```json|```/g, "").trim());
 }
 
 async function responderTexto(mensagem, usuario) {
-    const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
-        {
-            model: 'gpt-4o-mini',
-            messages: [
-                {
-                    role: 'system',
-                    content: `Você é ${usuario.apelido_bot || 'Wesley Nutricionista'}, direto e humano.
-Usuário: ${usuario.nome}, objetivo: ${usuario.objetivo}, meta: ${usuario.calorias_diarias} kcal/dia.
-Resposta curta. Use pq no lugar de porque. Sem pontuação exagerada.`
-                },
-                { role: 'user', content: mensagem }
-            ]
-        },
-        { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' } }
-    );
+    const system = "Voce e " + (usuario.apelido_bot || "assistente de nutricao") + ", direto e humano. Usuario: " + usuario.nome + ", objetivo: " + usuario.objetivo + ", meta: " + usuario.calorias_diarias + " kcal/dia. Resposta curta. Use pq. Sem pontuacao exagerada.";
+    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages: [{ role: "system", content: system }, { role: "user", content: mensagem }] }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
     return response.data.choices[0].message.content;
 }
 
-// ==================== ESTADOS ====================
+async function processarOnboarding(numero, usuario, texto) {
+    const estado = usuario.estado;
+    const dados = getDados(usuario);
+    await enviarDigitando(numero);
 
-const estados = {};
+    if (estado === "apresentacao") {
+        if (texto && texto.toLowerCase().includes("come")) { await atualizarUsuario(numero, { estado: "nome" }); await enviarMensagem(numero, "qual seu nome"); }
+        else { await enviarMensagem(numero, "digita comecar pra iniciar"); }
+        return;
+    }
+    if (estado === "nome") {
+        dados.nome = texto.trim();
+        await atualizarUsuario(numero, { nome: dados.nome, estado: "apelido_bot", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "prazer " + dados.nome + "\n\ncomo voce quer me chamar\n\ncoloca um nome pra mim");
+        return;
+    }
+    if (estado === "apelido_bot") {
+        dados.apelido_bot = texto.trim();
+        await atualizarUsuario(numero, { apelido_bot: dados.apelido_bot, estado: "objetivo", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "combinado me chama de " + dados.apelido_bot + "\n\nqual seu objetivo\n\n1 emagrecer\n2 ganhar massa\n3 manter o peso");
+        return;
+    }
+    if (estado === "objetivo") {
+        const t = texto.toLowerCase();
+        if (t.includes("1") || t.includes("emagrec")) dados.objetivo = "emagrecer";
+        else if (t.includes("2") || t.includes("ganhar") || t.includes("massa")) dados.objetivo = "ganhar";
+        else dados.objetivo = "manter";
+        await atualizarUsuario(numero, { objetivo: dados.objetivo, estado: "peso", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "qual seu peso em kg\n\nex: 75");
+        return;
+    }
+    if (estado === "peso") {
+        const peso = parseFloat(texto.replace(",", "."));
+        if (isNaN(peso) || peso < 30 || peso > 300) { await enviarMensagem(numero, "manda so o numero do peso\n\nex: 75"); return; }
+        dados.peso = peso;
+        await atualizarUsuario(numero, { peso: dados.peso, estado: "altura", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "e sua altura em cm\n\nex: 175");
+        return;
+    }
+    if (estado === "altura") {
+        let altura = parseFloat(texto.replace(",", "."));
+        if (isNaN(altura)) { await enviarMensagem(numero, "manda so o numero da altura em cm\n\nex: 175"); return; }
+        if (altura < 3) altura = Math.round(altura * 100);
+        dados.altura = altura;
+        await atualizarUsuario(numero, { altura: dados.altura, estado: "alimentacao_local", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "onde voce faz suas refeicoes\n\n1 em casa\n2 refeitorio da empresa\n3 restaurante\n4 como o que tiver");
+        return;
+    }
+    if (estado === "alimentacao_local") {
+        const t = texto.toLowerCase();
+        if (t.includes("1") || t.includes("casa")) dados.alimentacao_local = "em casa";
+        else if (t.includes("2") || t.includes("refeit") || t.includes("empresa")) dados.alimentacao_local = "refeitorio da empresa";
+        else if (t.includes("3") || t.includes("restaur")) dados.alimentacao_local = "restaurante";
+        else dados.alimentacao_local = "como o que tiver";
+        await atualizarUsuario(numero, { alimentacao_local: dados.alimentacao_local, estado: "comida", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "o que voce mais gosta de comer\n\nme conta sua alimentacao atual");
+        return;
+    }
+    if (estado === "comida") {
+        dados.comida = texto.trim();
+        await atualizarUsuario(numero, { comida: dados.comida, estado: "restricoes", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "tem algum alimento que nao gosta ou alergia");
+        return;
+    }
+    if (estado === "restricoes") {
+        dados.restricoes = texto.trim();
+        await atualizarUsuario(numero, { restricoes: dados.restricoes, estado: "rotina", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "como e sua rotina\n\n1 trabalho sentado\n2 trabalho em pe\n3 faco exercicio\n4 combinacao de varios");
+        return;
+    }
+    if (estado === "rotina") {
+        dados.rotina = texto.trim();
+        await atualizarUsuario(numero, { rotina: dados.rotina, estado: "orcamento", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "quanto voce tem pra gastar com alimentacao\n\nex: 300 por semana ou 800 por mes");
+        return;
+    }
+    if (estado === "orcamento") {
+        const match = texto.match(/[\d.,]+/);
+        dados.orcamento = match ? parseFloat(match[0].replace(",", ".")) : 300;
+        await atualizarUsuario(numero, { orcamento: dados.orcamento, estado: "frequencia_compras", estado_dados: JSON.stringify(dados) });
+        await enviarMensagem(numero, "voce faz compras\n\n1 semanal\n2 mensal");
+        return;
+    }
+    if (estado === "frequencia_compras") {
+        dados.frequencia_compras = (texto.toLowerCase().includes("1") || texto.toLowerCase().includes("semana")) ? "semanal" : "mensal";
+        const calorias = calcularCalorias(dados.peso || 70, dados.altura || 170, dados.objetivo || "manter");
+        await atualizarUsuario(numero, { frequencia_compras: dados.frequencia_compras, calorias_diarias: calorias, estado: "ativo", estado_dados: null });
+        await enviarMensagem(numero, "perfeito deixa eu montar seu plano");
+        const usuarioAtualizado = await buscarUsuario(numero);
+        const mensagens = await gerarPlano(usuarioAtualizado);
+        for (const msg of mensagens) { if (msg) { await enviarDigitando(numero); await enviarMensagem(numero, msg); } }
+        await enviarMensagem(numero, "pronto agora manda foto das suas refeicoes que eu analiso na hora\n\nqualquer duvida e so perguntar\n\npara assinar o plano completo digita assinar");
+        return;
+    }
+}
 
-// ==================== WEBHOOK ====================
-
-app.post('/webhook', async (req, res) => {
+app.post("/webhook", async (req, res) => {
     try {
         res.sendStatus(200);
-
         const body = req.body;
         if (body?.data?.key?.fromMe) return;
-        if (body?.event !== 'messages.upsert') return;
-
+        if (body?.event !== "messages.upsert") return;
         const data = body.data;
         const numero = data?.key?.remoteJid;
         const texto = data?.message?.conversation || data?.message?.extendedTextMessage?.text;
         const temImagem = data?.message?.imageMessage;
-
         if (!numero) return;
-        console.log(`📩 ${numero}: ${texto || '[imagem]'}`);
-
+        if (numero.endsWith('@g.us')) return;
+        console.log("📩 " + numero + ": " + (texto || "[imagem]"));
         let usuario = await buscarUsuario(numero);
 
-        // RESET
-        if (texto && ['resetar', 'recomeçar', 'resetar dados', 'recomecar'].includes(texto.toLowerCase().trim())) {
-            await db.query('DELETE FROM diario WHERE numero = $1', [numero]);
-            await db.query('DELETE FROM usuarios WHERE numero = $1', [numero]);
-            delete estados[numero];
-            await enviarMensagem(numero, `tudo limpo ✅\n\npode começar do zero`);
+        if (texto && ["resetar", "recomecar", "resetar dados"].includes(texto.toLowerCase().trim())) {
+            await db.query("DELETE FROM diario WHERE numero = $1", [numero]);
+            await db.query("DELETE FROM usuarios WHERE numero = $1", [numero]);
+            await enviarMensagem(numero, "tudo limpo\npode comecar do zero");
             return;
         }
 
-        // USUÁRIO NOVO
         if (!usuario) {
-            await criarUsuario(numero);
-            estados[numero] = { etapa: 'apresentacao' };
-            await enviarMensagem(numero,
-                `oi 👋 eu sou seu assistente de nutrição pessoal\n\nnos próximos 4 dias vou te ajudar a:\n\n✅ analisar suas refeições por foto\n✅ montar um plano alimentar do seu jeito\n✅ calcular sua lista de compras pelo seu orçamento\n✅ criar um treino baseado na sua rotina\n✅ acompanhar suas calorias no dia a dia\n\né só seguir e ver o resultado\n\ndigita *começar* pra iniciar`
-            );
+            usuario = await criarUsuario(numero);
+            await enviarDigitando(numero);
+            await enviarMensagem(numero, "oi sou seu assistente de nutricao pessoal\n\nnos proximos 4 dias vou te ajudar a\n\n1 analisar suas refeicoes por foto\n2 montar um plano alimentar do seu jeito\n3 calcular sua lista de compras pelo seu orcamento\n4 criar um treino baseado na sua rotina\n5 acompanhar suas calorias no dia a dia\n\ne so seguir e ver o resultado\n\ndigitas comecar pra iniciar");
             return;
         }
 
-        // AGUARDANDO CONFIRMAÇÃO DE INÍCIO
-        if (estados[numero]?.etapa === 'apresentacao') {
-            if (texto && texto.toLowerCase().includes('come')) {
-                estados[numero] = { etapa: 'nome' };
-                await enviarMensagem(numero, `boa 💪\n\nprimeiro me diz seu nome`);
-            } else {
-                await enviarMensagem(numero, `digita *começar* pra iniciar`);
-            }
+        if (usuario.estado && usuario.estado !== "ativo") { if (!texto) return; await processarOnboarding(numero, usuario, texto); return; }
+
+        if (texto && texto.toLowerCase().trim() === "assinar") {
+            await enviarDigitando(numero);
+            await enviarMensagem(numero, "plano mensal\n\ncom a assinatura voce tem\n\n1 analise ilimitada de fotos\n2 plano alimentar atualizado toda semana\n3 treino progressivo semana a semana\n4 resumo automatico no final do dia\n5 lista de compras detalhada\n6 suporte ilimitado\n\n[LINK DO PAGAMENTO AQUI]\n\naps o pagamento manda o comprovante");
             return;
         }
 
-        // ONBOARDING
-        if (estados[numero]) {
-            const estado = estados[numero];
-            if (!texto) return;
-            const txt = texto.trim();
+        if (!verificarTrialAtivo(usuario)) { await enviarDigitando(numero); await enviarMensagem(numero, "seu teste de 4 dias encerrou\n\ngostou do que viu\n\ndigita assinar pra continuar"); return; }
 
-            if (estado.etapa === 'nome') {
-                estado.nome = txt;
-                estado.etapa = 'apelido_bot';
-                await enviarMensagem(numero, `prazer ${txt} 👋\n\ncomo você quer me chamar\n\npode ser um nome, apelido, o que preferir`);
-                return;
-            }
-
-            if (estado.etapa === 'apelido_bot') {
-                estado.apelido_bot = txt;
-                estado.etapa = 'objetivo';
-                await enviarMensagem(numero, `combinado, pode me chamar de ${txt} 😄\n\nqual seu objetivo\n\n1 emagrecer\n2 ganhar massa\n3 manter o peso`);
-                return;
-            }
-
-            if (estado.etapa === 'objetivo') {
-                const t = txt.toLowerCase();
-                if (t.includes('1') || t.includes('emagrec')) estado.objetivo = 'emagrecer';
-                else if (t.includes('2') || t.includes('ganhar') || t.includes('massa')) estado.objetivo = 'ganhar';
-                else estado.objetivo = 'manter';
-                estado.etapa = 'peso';
-                await enviarMensagem(numero, `qual seu peso atual em kg\n\nex: 75`);
-                return;
-            }
-
-            if (estado.etapa === 'peso') {
-                const peso = parseFloat(txt.replace(',', '.'));
-                if (isNaN(peso) || peso < 30 || peso > 300) {
-                    await enviarMensagem(numero, `manda só o número do peso\n\nex: 75`);
-                    return;
-                }
-                estado.peso = peso;
-                estado.etapa = 'altura';
-                await enviarMensagem(numero, `e sua altura em cm\n\nex: 175`);
-                return;
-            }
-
-            if (estado.etapa === 'altura') {
-                let altura = parseFloat(txt.replace(',', '.'));
-                if (isNaN(altura)) {
-                    await enviarMensagem(numero, `manda só o número da altura\n\nex: 175`);
-                    return;
-                }
-                if (altura < 3) altura = Math.round(altura * 100);
-                estado.altura = altura;
-                estado.etapa = 'alimentacao_local';
-                await enviarMensagem(numero, `onde você costuma fazer suas refeições\n\nexemplo: em casa, refeitório da empresa, restaurante, como o que tiver`);
-                return;
-            }
-
-            if (estado.etapa === 'alimentacao_local') {
-                estado.alimentacao_local = txt;
-                estado.etapa = 'comida';
-                await enviarMensagem(numero, `o que você costuma comer no dia a dia\n\nme conta sua alimentação atual`);
-                return;
-            }
-
-            if (estado.etapa === 'comida') {
-                estado.comida = txt;
-                estado.etapa = 'restricoes';
-                await enviarMensagem(numero, `tem algum alimento que não gosta ou alergia a algo`);
-                return;
-            }
-
-            if (estado.etapa === 'restricoes') {
-                estado.restricoes = txt;
-                estado.etapa = 'rotina';
-                await enviarMensagem(numero, `como é sua rotina\n\ntrabalha sentado, em pé, faz exercício, pratica algum esporte`);
-                return;
-            }
-
-            if (estado.etapa === 'rotina') {
-                estado.rotina = txt;
-                estado.etapa = 'orcamento';
-                await enviarMensagem(numero, `quanto você tem pra gastar com alimentação\n\nex: R$300 por semana ou R$800 por mês`);
-                return;
-            }
-
-            if (estado.etapa === 'orcamento') {
-                const match = txt.match(/[\d.,]+/);
-                estado.orcamento = match ? parseFloat(match[0].replace(',', '.')) : 0;
-                estado.etapa = 'frequencia_compras';
-                await enviarMensagem(numero, `você faz compras semanal ou mensal`);
-                return;
-            }
-
-            if (estado.etapa === 'frequencia_compras') {
-                estado.frequencia_compras = txt.toLowerCase().includes('semana') ? 'semanal' : 'mensal';
-                estado.calorias = calcularCalorias(estado.peso, estado.altura, estado.objetivo);
-
-                await atualizarUsuario(numero, {
-                    nome: estado.nome,
-                    apelido_bot: estado.apelido_bot,
-                    objetivo: estado.objetivo,
-                    peso: estado.peso,
-                    altura: estado.altura,
-                    calorias_diarias: estado.calorias,
-                    alimentacao_local: estado.alimentacao_local,
-                    comida: estado.comida,
-                    restricoes: estado.restricoes,
-                    rotina: estado.rotina,
-                    orcamento: estado.orcamento,
-                    frequencia_compras: estado.frequencia_compras
-                });
-
-                delete estados[numero];
-
-                await enviarMensagem(numero, `perfeito ${estado.nome} ✅\n\ndeixa eu montar teu plano completo`);
-
-                const mensagens = await gerarPlanoCompleto(estado);
-                for (const msg of mensagens) {
-                    if (msg) await enviarMensagem(numero, msg);
-                    await new Promise(r => setTimeout(r, 1500));
-                }
-
-                await enviarMensagem(numero,
-                    `pronto 🎯\n\nagora é só mandar foto das suas refeições que eu analiso na hora\n\nqualquer dúvida é só perguntar\n\ne se quiser assinar o plano mensal pra ter acesso completo é só digitar *assinar*`
-                );
-                return;
-            }
-        }
-
-        // ASSINAR
-        if (texto && texto.toLowerCase().trim() === 'assinar') {
-            await enviarMensagem(numero,
-                `plano mensal 💳\n\ncom a assinatura você tem:\n\n✅ análise ilimitada de fotos\n✅ plano alimentar atualizado toda semana\n✅ treino progressivo semana a semana\n✅ resumo automático no final do dia\n✅ lista de compras detalhada\n✅ suporte ilimitado\n\nclique no link pra assinar:\n\n[LINK DO MERCADO PAGO AQUI]\n\naps o pagamento me manda o comprovante que libero seu acesso na hora`
-            );
-            return;
-        }
-
-        // COMPROVANTE
-        if (texto && texto.toLowerCase().includes('comprovante')) {
-            // Aqui futuramente vai a verificação automática do Mercado Pago
-            await enviarMensagem(numero,
-                `recebi o comprovante ✅\n\nvou verificar e liberar seu acesso em instantes`
-            );
-            return;
-        }
-
-        // TRIAL EXPIRADO
-        if (!verificarTrialAtivo(usuario)) {
-            await enviarMensagem(numero,
-                `seu teste de 4 dias encerrou 😊\n\ngostou do que viu\n\ndigita *assinar* pra continuar com acesso completo`
-            );
-            return;
-        }
-
-        // IMAGEM
         if (temImagem) {
-            console.log('📸 Baixando imagem...');
-            const mediaResponse = await axios.post(
-                'http://localhost:8080/chat/getBase64FromMediaMessage/nutribot-teste',
-                { message: { key: data.key, message: data.message } },
-                { headers: { apikey: process.env.EVOLUTION_API_KEY || 'intelbraS12', 'Content-Type': 'application/json' } }
-            );
-
+            console.log("📸 Baixando imagem...");
+            await enviarDigitando(numero);
+            const mediaResponse = await axios.post("http://localhost:8080/chat/getBase64FromMediaMessage/" + INSTANCE, { message: { key: data.key, message: data.message } }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } });
             const base64 = mediaResponse.data.base64;
-            const mimeType = mediaResponse.data.mimetype || 'image/jpeg';
-
+            const mimeType = mediaResponse.data.mimetype || "image/jpeg";
             usuario = await buscarUsuario(numero);
-            console.log('🧠 Analisando...');
             const analise = await analisarImagem(base64, mimeType, usuario);
-
             await salvarRefeicao(numero, analise.refeicao, analise.calorias, analise.proteina, analise.carboidratos, analise.gordura);
-
             const diario = await buscarDiarioHoje(numero);
             const total = diario.reduce((acc, r) => acc + (r.calorias || 0), 0);
             const restante = Math.max(0, usuario.calorias_diarias - total);
-
-            await enviarMensagem(numero, `${analise.mensagem}\n\n📊 *resumo do dia*\nconsumido: ${total} kcal\nmeta: ${usuario.calorias_diarias} kcal\nrestante: ${restante} kcal`);
-            console.log('✅ Análise enviada');
+            await enviarMensagem(numero, analise.mensagem + "\n\nresumo do dia\nconsumido: " + total + " kcal\nmeta: " + usuario.calorias_diarias + " kcal\nrestante: " + restante + " kcal");
             return;
         }
 
-        // TEXTO LIVRE
-        if (texto) {
-            usuario = await buscarUsuario(numero);
-            const resposta = await responderTexto(texto, usuario);
-            await enviarMensagem(numero, resposta);
-            return;
-        }
+        if (texto) { await enviarDigitando(numero); usuario = await buscarUsuario(numero); const resposta = await responderTexto(texto, usuario); await enviarMensagem(numero, resposta); return; }
 
-    } catch (error) {
-        console.error('❌ ERRO:', error.response?.data || error.message);
-    }
+    } catch (error) { console.error("❌ ERRO:", error.response?.data || error.message); }
 });
 
-app.get('/', (req, res) => res.send('NutriBot rodando 🚀'));
+app.get("/", (req, res) => res.send("NutriBot rodando"));
+app.listen(process.env.PORT || 3000, () => { console.log("✅ NutriBot rodando"); });
 
-app.listen(process.env.PORT || 3000, () => {
-    console.log('✅ NutriBot rodando');
-});
