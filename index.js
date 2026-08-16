@@ -197,12 +197,18 @@ app.post("/webhook", async (req, res) => {
 
         if (!global.debounceTimers) global.debounceTimers = {};
         if (global.debounceTimers[numero]) clearTimeout(global.debounceTimers[numero]);
-        await new Promise(resolve => { global.debounceTimers[numero] = setTimeout(resolve, 4000); });
+        await new Promise(resolve => { global.debounceTimers[numero] = setTimeout(resolve, 6000); });
         delete global.debounceTimers[numero];
 
         console.log("📩 " + numero + ": " + (texto || "[imagem]"));
         let usuario = await buscarUsuario(numero);
-
+if (texto && texto.toLowerCase().startsWith("admin#trial#")) {
+    const dias = parseInt(texto.split("#")[2]) || 4;
+    const novaData = new Date(Date.now() - (4 - dias) * 24 * 60 * 60 * 1000);
+    await db.query("UPDATE usuarios SET trial_inicio = $1, plano = 'trial' WHERE numero = $2", [novaData, numero]);
+    await enviarMensagem(numero, "trial estendido por " + dias + " dias");
+    return;
+}
         if (texto && ["resetar", "recomecar", "resetar dados"].includes(texto.toLowerCase().trim())) {
             await db.query("DELETE FROM diario WHERE numero = $1", [numero]);
             await db.query("DELETE FROM usuarios WHERE numero = $1", [numero]);
