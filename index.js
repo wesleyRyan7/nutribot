@@ -194,6 +194,12 @@ app.post("/webhook", async (req, res) => {
         const temImagem = data?.message?.imageMessage;
         if (!numero) return;
         if (numero.endsWith('@g.us')) return;
+
+        if (!global.debounceTimers) global.debounceTimers = {};
+        if (global.debounceTimers[numero]) clearTimeout(global.debounceTimers[numero]);
+        await new Promise(resolve => { global.debounceTimers[numero] = setTimeout(resolve, 4000); });
+        delete global.debounceTimers[numero];
+
         console.log("📩 " + numero + ": " + (texto || "[imagem]"));
         let usuario = await buscarUsuario(numero);
 
