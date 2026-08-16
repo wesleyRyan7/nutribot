@@ -18,10 +18,10 @@ async function enviarMensagem(numero, mensagem) {
     } catch (e) { console.error("Erro envio:", e.message); }
 }
 
-async function enviarDigitando(numero) {
+async function enviarDigitando(numero, segundos) {
     try {
-        await axios.post("http://localhost:8080/chat/presence/" + INSTANCE, { number: numero, presence: "composing", delay: 2000 }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } });
-        await new Promise(r => setTimeout(r, 2000));
+        await axios.post("http://localhost:8080/chat/presence/" + INSTANCE, { number: numero, presence: "composing", delay: (segundos || 2) * 1000 }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } });
+        await new Promise(r => setTimeout(r, (segundos || 2) * 1000));
     } catch (e) {}
 }
 
@@ -41,7 +41,7 @@ async function atualizarUsuario(numero, dados) {
 }
 
 async function salvarRefeicao(numero, refeicao, calorias, proteina, carboidratos, gordura) {
-    await db.query("INSERT INTO diario (numero, refeicao, calorias, proteina, carboidratos, gordura) VALUES ($1,$2,$3,$4,$5,$6)", [numero, refeicao, calorias, proteina, carboidratos, gordura]);
+    await db.query("INSERT INTO diario (numero, refeicao, calorias, proteina, carboidratos, gordura, horario) VALUES ($1,$2,$3,$4,$5,$6, CURRENT_TIME)", [numero, refeicao, calorias, proteina, carboidratos, gordura]);
 }
 
 async function buscarDiarioHoje(numero) {
@@ -68,28 +68,65 @@ function getDados(usuario) {
     try { return usuario.estado_dados ? JSON.parse(usuario.estado_dados) : {}; } catch { return {}; }
 }
 
-async function gerarPlano(usuario) {
-    const prompt = "Voce e " + (usuario.apelido_bot || "assistente de nutricao") + ", direto e humano.\n\nDados:\n- Nome: " + usuario.nome + "\n- Objetivo: " + usuario.objetivo + "\n- Peso: " + usuario.peso + "kg / Altura: " + usuario.altura + "cm\n- Meta: " + usuario.calorias_diarias + " kcal/dia\n- Come em: " + usuario.alimentacao_local + "\n- Gosta de: " + usuario.comida + "\n- Restricoes: " + usuario.restricoes + "\n- Rotina: " + usuario.rotina + "\n- Orcamento: R$" + usuario.orcamento + " " + usuario.frequencia_compras + "\n\nEscreva 3 mensagens separadas por ---SEP---\n1: boas vindas com nome objetivo e meta calorica simples\n2: plano alimentar do dia com almoco lanche jantar usando alimentos simples. Inclua lista de compras\n3: treino basico baseado na rotina e objetivo\n\nRegras: use pq no lugar de porque, sem pontuacao exagerada, blocos curtos";
-    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }] }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
-    return response.data.choices[0].message.content.split("---SEP---").map(m => m.trim()).filter(m => m);
+function horaAtual() {
+    return new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
 }
 
-async function analisarImagem(base64, mimeType, usuario) {
-    const prompt = "Voce e " + (usuario.apelido_bot || "assistente de nutricao") + ". Analise a refeicao. Usuario: " + usuario.nome + ", objetivo: " + usuario.objetivo + ", meta: " + usuario.calorias_diarias + " kcal/dia.\n\nResponda APENAS este JSON:\n{\"refeicao\": \"descricao breve\", \"calorias\": numero, \"proteina\": numero, \"carboidratos\": numero, \"gordura\": numero, \"mensagem\": \"analise curta e humana\"}";
-    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: "data:" + mimeType + ";base64," + base64 } }] }] }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
-    return JSON.parse(response.data.choices[0].message.content.replace(/```json|```/g, "").trim());
-}
-
-async function responderTexto(mensagem, usuario) {
-    const system = "Voce e " + (usuario.apelido_bot || "assistente de nutricao") + ", direto e humano. Usuario: " + usuario.nome + ", objetivo: " + usuario.objetivo + ", meta: " + usuario.calorias_diarias + " kcal/dia. Resposta curta. Use pq. Sem pontuacao exagerada.";
-    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages: [{ role: "system", content: system }, { role: "user", content: mensagem }] }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
+async function chamarOpenAI(messages, max_tokens) {
+    const response = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o-mini", messages, max_tokens: max_tokens || 300 }, { headers: { Authorization: "Bearer " + process.env.OPENAI_API_KEY, "Content-Type": "application/json" } });
     return response.data.choices[0].message.content;
+}
+
+async function gerarPlano(usuario) {
+    const prompt = "Voce e " + (usuario.apelido_bot || "nutri") + ", nutricionista direto e humano.\n\nPerfil:\n- " + usuario.nome + ", " + usuario.objetivo + "\n- " + usuario.peso + "kg / " + usuario.altura + "cm / meta: " + usuario.calorias_diarias + " kcal\n- Proteina: " + Math.round(usuario.peso * 1.8) + "g / Carbo: " + Math.round(usuario.calorias_diarias * 0.4 / 4) + "g / Gordura: " + Math.round(usuario.calorias_diarias * 0.25 / 9) + "g\n- Come em: " + usuario.alimentacao_local + "\n- Gosta de: " + usuario.comida + "\n- Restricoes: " + usuario.restricoes + "\n- Rotina: " + usuario.rotina + "\n- Orcamento: R$" + usuario.orcamento + " " + usuario.frequencia_compras + "\n\nEscreva 3 mensagens curtas separadas por ---SEP---\n1: boas vindas + meta calorica + macros do dia (proteina carbo gordura)\n2: plano alimentar simples pro dia baseado na realidade da pessoa + lista de compras enxuta\n3: treino simples e realista\n\nRegras: frases curtas, sem enrolacao, use pq, sem pontuacao exagerada";
+    const resposta = await chamarOpenAI([{ role: "user", content: prompt }], 600);
+    return resposta.split("---SEP---").map(m => m.trim()).filter(m => m);
+}
+
+async function analisarImagem(base64, mimeType, usuario, diario) {
+    const totalAtual = diario.reduce((acc, r) => acc + (r.calorias || 0), 0);
+    const restante = Math.max(0, usuario.calorias_diarias - totalAtual);
+    const prompt = "Voce e " + (usuario.apelido_bot || "nutri") + ". Analise a refeicao.\nUsuario: " + usuario.nome + " / meta: " + usuario.calorias_diarias + " kcal / ja consumiu: " + totalAtual + " kcal / restante: " + restante + " kcal\nObjetivo: " + usuario.objetivo + "\n\nResponda APENAS JSON:\n{\"refeicao\": \"descricao curta\", \"calorias\": numero, \"proteina\": numero, \"carboidratos\": numero, \"gordura\": numero, \"mensagem\": \"analise curta em 2 linhas max, fale se ta bom ou ruim pro objetivo, seja direto e honesto\"}";
+    const resposta = await chamarOpenAI([{ role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: "data:" + mimeType + ";base64," + base64 } }] }], 300);
+    return JSON.parse(resposta.replace(/```json|```/g, "").trim());
+}
+
+async function transcreverAudio(base64, mimeType) {
+    try {
+        const FormData = require("form-data");
+        const form = new FormData();
+        const buffer = Buffer.from(base64, "base64");
+        form.append("file", buffer, { filename: "audio.ogg", contentType: mimeType || "audio/ogg" });
+        form.append("model", "whisper-1");
+        form.append("language", "pt");
+        const response = await axios.post("https://api.openai.com/v1/audio/transcriptions", form, { headers: { ...form.getHeaders(), Authorization: "Bearer " + process.env.OPENAI_API_KEY } });
+        return response.data.text;
+    } catch (e) {
+        console.error("Erro transcricao:", e.message);
+        return null;
+    }
+}
+
+async function responderTexto(mensagem, usuario, diario) {
+    const totalAtual = diario.reduce((acc, r) => acc + (r.calorias || 0), 0);
+    const restante = Math.max(0, usuario.calorias_diarias - totalAtual);
+    const refeicoes = diario.map(r => r.refeicao + " (" + r.calorias + " kcal as " + (r.horario ? r.horario.substring(0, 5) : "?") + "h)").join(", ");
+
+    const system = "Voce e " + (usuario.apelido_bot || "nutri") + ", nutricionista direto, honesto e as vezes rigoroso.\n" +
+        "Usuario: " + usuario.nome + " / objetivo: " + usuario.objetivo + " / meta: " + usuario.calorias_diarias + " kcal\n" +
+        "Macros diarios: proteina " + Math.round(usuario.peso * 1.8) + "g / carbo " + Math.round(usuario.calorias_diarias * 0.4 / 4) + "g / gordura " + Math.round(usuario.calorias_diarias * 0.25 / 9) + "g\n" +
+        "Consumido hoje: " + totalAtual + " kcal / restante: " + restante + " kcal\n" +
+        "Refeicoes de hoje: " + (refeicoes || "nenhuma registrada") + "\n" +
+        "Hora atual: " + horaAtual() + "\n\n" +
+        "Regras: frases curtas, sem enrolacao, use pq, seja honesto e direto. Se a pessoa desleixou cobra. Se faltam calorias sugira algo especifico pra fechar. Se comeu errado fala. Max 4 linhas.";
+
+    return await chamarOpenAI([{ role: "system", content: system }, { role: "user", content: mensagem }], 200);
 }
 
 async function processarOnboarding(numero, usuario, texto) {
     const estado = usuario.estado;
     const dados = getDados(usuario);
-    await enviarDigitando(numero);
+    await enviarDigitando(numero, 1);
 
     if (estado === "apresentacao") {
         if (texto && texto.toLowerCase().includes("come")) { await atualizarUsuario(numero, { estado: "nome" }); await enviarMensagem(numero, "qual seu nome"); }
@@ -99,13 +136,13 @@ async function processarOnboarding(numero, usuario, texto) {
     if (estado === "nome") {
         dados.nome = texto.trim();
         await atualizarUsuario(numero, { nome: dados.nome, estado: "apelido_bot", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "prazer " + dados.nome + "\n\ncomo voce quer me chamar\n\ncoloca um nome pra mim");
+        await enviarMensagem(numero, "prazer " + dados.nome + "\n\ncomo voce quer me chamar");
         return;
     }
     if (estado === "apelido_bot") {
         dados.apelido_bot = texto.trim();
         await atualizarUsuario(numero, { apelido_bot: dados.apelido_bot, estado: "objetivo", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "combinado me chama de " + dados.apelido_bot + "\n\nqual seu objetivo\n\n1 emagrecer\n2 ganhar massa\n3 manter o peso");
+        await enviarMensagem(numero, "combinado\n\nqual seu objetivo\n\n1 emagrecer\n2 ganhar massa\n3 manter o peso");
         return;
     }
     if (estado === "objetivo") {
@@ -119,15 +156,15 @@ async function processarOnboarding(numero, usuario, texto) {
     }
     if (estado === "peso") {
         const peso = parseFloat(texto.replace(",", "."));
-        if (isNaN(peso) || peso < 30 || peso > 300) { await enviarMensagem(numero, "manda so o numero do peso\n\nex: 75"); return; }
+        if (isNaN(peso) || peso < 30 || peso > 300) { await enviarMensagem(numero, "manda so o numero\n\nex: 75"); return; }
         dados.peso = peso;
         await atualizarUsuario(numero, { peso: dados.peso, estado: "altura", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "e sua altura em cm\n\nex: 175");
+        await enviarMensagem(numero, "altura em cm\n\nex: 175");
         return;
     }
     if (estado === "altura") {
         let altura = parseFloat(texto.replace(",", "."));
-        if (isNaN(altura)) { await enviarMensagem(numero, "manda so o numero da altura em cm\n\nex: 175"); return; }
+        if (isNaN(altura)) { await enviarMensagem(numero, "manda so o numero\n\nex: 175"); return; }
         if (altura < 3) altura = Math.round(altura * 100);
         dados.altura = altura;
         await atualizarUsuario(numero, { altura: dados.altura, estado: "alimentacao_local", estado_dados: JSON.stringify(dados) });
@@ -141,46 +178,112 @@ async function processarOnboarding(numero, usuario, texto) {
         else if (t.includes("3") || t.includes("restaur")) dados.alimentacao_local = "restaurante";
         else dados.alimentacao_local = "como o que tiver";
         await atualizarUsuario(numero, { alimentacao_local: dados.alimentacao_local, estado: "comida", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "o que voce mais gosta de comer\n\nme conta sua alimentacao atual");
+        await enviarMensagem(numero, "o que voce mais gosta de comer\n\npode listar a vontade");
         return;
     }
     if (estado === "comida") {
         dados.comida = texto.trim();
         await atualizarUsuario(numero, { comida: dados.comida, estado: "restricoes", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "tem algum alimento que nao gosta ou alergia");
+        await enviarMensagem(numero, "tem algum alimento que nao gosta ou alergia\n\nse nao tiver manda nao");
         return;
     }
     if (estado === "restricoes") {
         dados.restricoes = texto.trim();
         await atualizarUsuario(numero, { restricoes: dados.restricoes, estado: "rotina", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "como e sua rotina\n\n1 trabalho sentado\n2 trabalho em pe\n3 faco exercicio\n4 combinacao de varios");
+        await enviarMensagem(numero, "como e sua rotina\n\n1 trabalho sentado\n2 trabalho em pe\n3 faco exercicio\n4 combinacao");
         return;
     }
     if (estado === "rotina") {
         dados.rotina = texto.trim();
         await atualizarUsuario(numero, { rotina: dados.rotina, estado: "orcamento", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "quanto voce tem pra gastar com alimentacao\n\nex: 300 por semana ou 800 por mes");
+        await enviarMensagem(numero, "quanto tem pra gastar com alimentacao\n\nex: 300 por semana ou 800 por mes");
         return;
     }
     if (estado === "orcamento") {
         const match = texto.match(/[\d.,]+/);
         dados.orcamento = match ? parseFloat(match[0].replace(",", ".")) : 300;
         await atualizarUsuario(numero, { orcamento: dados.orcamento, estado: "frequencia_compras", estado_dados: JSON.stringify(dados) });
-        await enviarMensagem(numero, "voce faz compras\n\n1 semanal\n2 mensal");
+        await enviarMensagem(numero, "faz compras\n\n1 semanal\n2 mensal");
         return;
     }
     if (estado === "frequencia_compras") {
         dados.frequencia_compras = (texto.toLowerCase().includes("1") || texto.toLowerCase().includes("semana")) ? "semanal" : "mensal";
         const calorias = calcularCalorias(dados.peso || 70, dados.altura || 170, dados.objetivo || "manter");
         await atualizarUsuario(numero, { frequencia_compras: dados.frequencia_compras, calorias_diarias: calorias, estado: "ativo", estado_dados: null });
-        await enviarMensagem(numero, "perfeito deixa eu montar seu plano");
+        await enviarMensagem(numero, "perfeito montando seu plano...");
         const usuarioAtualizado = await buscarUsuario(numero);
         const mensagens = await gerarPlano(usuarioAtualizado);
-        for (const msg of mensagens) { if (msg) { await enviarDigitando(numero); await enviarMensagem(numero, msg); } }
-        await enviarMensagem(numero, "pronto agora manda foto das suas refeicoes que eu analiso na hora\n\nqualquer duvida e so perguntar\n\npara assinar o plano completo digita assinar");
+        for (const msg of mensagens) { if (msg) { await enviarDigitando(numero, 2); await enviarMensagem(numero, msg); } }
+        await enviarMensagem(numero, "pronto\n\nmanda foto das refeicoes que eu analiso\npode mandar audio tambem descrevendo o que comeu\n\nduvidas e so perguntar");
         return;
     }
 }
+
+// ==================== NOTIFICACOES ====================
+
+async function enviarNotificacoes() {
+    try {
+        const agora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+        const hora = agora.getHours();
+        const minuto = agora.getMinutes();
+
+        const usuarios = await db.query("SELECT * FROM usuarios WHERE estado = 'ativo' AND (plano = 'premium' OR trial_inicio > NOW() - INTERVAL '4 days')");
+
+        for (const usuario of usuarios.rows) {
+            const diario = await buscarDiarioHoje(usuario.numero);
+            const total = diario.reduce((acc, r) => acc + (r.calorias || 0), 0);
+            const restante = Math.max(0, usuario.calorias_diarias - total);
+            const nome = usuario.nome || "voce";
+
+            // 8h - bom dia e pergunta que horas acordou
+            if (hora === 8 && minuto < 2) {
+                await enviarMensagem(usuario.numero, "bom dia " + nome + "\n\nque horas voce acordou hoje");
+            }
+
+            // 12h - lembrete almoco
+            if (hora === 12 && minuto < 2) {
+                await enviarMensagem(usuario.numero, "ta na hora do almoco " + nome + "\n\nta pensando em comer o que\n\nmanda foto quando fizer");
+            }
+
+            // 15h - lanche da tarde
+            if (hora === 15 && minuto < 2 && total < usuario.calorias_diarias * 0.6) {
+                await enviarMensagem(usuario.numero, "lembrete do lanche " + nome + "\n\nvocê consumiu " + total + " kcal\nfaltam " + restante + " kcal\n\njá fez algum lanche hoje");
+            }
+
+            // 20h - resumo do dia
+            if (hora === 20 && minuto < 2) {
+                if (total > 0) {
+                    const msg = total < usuario.calorias_diarias * 0.7
+                        ? "oi " + nome + "\n\nconsumistecomeu pouco hoje\n" + total + " de " + usuario.calorias_diarias + " kcal\n\nfaltam " + restante + " kcal\n\npode comer mais ainda ta no horario"
+                        : "resumo do dia " + nome + "\n\n" + total + " de " + usuario.calorias_diarias + " kcal\nfaltam " + restante + " kcal\n\nboa noite";
+                    await enviarMensagem(usuario.numero, msg);
+                } else {
+                    await enviarMensagem(usuario.numero, nome + " nao registrou nada hoje\n\ncomeu alguma coisa ou passou em branco\n\nmanda o que comeu que eu calculo tudo");
+                }
+            }
+
+            // 21h - cobrar quem sumiu
+            if (hora === 21 && minuto < 2 && total === 0) {
+                await enviarMensagem(usuario.numero, nome + " sumiu o dia todo\n\ncomeu o que hoje\n\nnao precisa ter vergonha manda tudo que eu calculo");
+            }
+
+            // cobrar intervalo longo sem registro
+            const ultimaRefeicao = diario.length > 0 ? new Date(diario[diario.length - 1].criado_em) : null;
+            if (ultimaRefeicao && hora >= 14 && hora <= 19) {
+                const horasSemComer = (agora - ultimaRefeicao) / (1000 * 60 * 60);
+                if (horasSemComer >= 5 && minuto < 2) {
+                    await enviarMensagem(usuario.numero, "faz " + Math.round(horasSemComer) + "h que voce nao registra nada " + nome + "\n\ncomeu alguma coisa nesse intervalo\n\nmanda foto ou me conta o que foi");
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Erro notificacoes:", e.message);
+    }
+}
+
+setInterval(enviarNotificacoes, 2 * 60 * 1000);
+
+// ==================== WEBHOOK ====================
 
 app.post("/webhook", async (req, res) => {
     try {
@@ -192,23 +295,32 @@ app.post("/webhook", async (req, res) => {
         const numero = data?.key?.remoteJid;
         const texto = data?.message?.conversation || data?.message?.extendedTextMessage?.text;
         const temImagem = data?.message?.imageMessage;
+        const temAudio = data?.message?.audioMessage || data?.message?.pttMessage;
+
         if (!numero) return;
-        if (numero.endsWith('@g.us')) return;
+        if (numero.endsWith("@g.us")) return;
 
         if (!global.debounceTimers) global.debounceTimers = {};
         if (global.debounceTimers[numero]) clearTimeout(global.debounceTimers[numero]);
         await new Promise(resolve => { global.debounceTimers[numero] = setTimeout(resolve, 6000); });
         delete global.debounceTimers[numero];
 
-        console.log("📩 " + numero + ": " + (texto || "[imagem]"));
+        console.log("📩 " + numero + ": " + (texto || (temImagem ? "[imagem]" : temAudio ? "[audio]" : "[outro]")));
+
+        await atualizarUsuario(numero, { ultima_mensagem: new Date() }).catch(() => {});
+
         let usuario = await buscarUsuario(numero);
-if (texto && texto.toLowerCase().startsWith("admin#trial#")) {
-    const dias = parseInt(texto.split("#")[2]) || 4;
-    const novaData = new Date(Date.now() - (4 - dias) * 24 * 60 * 60 * 1000);
-    await db.query("UPDATE usuarios SET trial_inicio = $1, plano = 'trial' WHERE numero = $2", [novaData, numero]);
-    await enviarMensagem(numero, "trial estendido por " + dias + " dias");
-    return;
-}
+
+        // COMANDO ADMIN
+        if (texto && texto.toLowerCase().startsWith("admin#trial#")) {
+            const dias = parseInt(texto.split("#")[2]) || 4;
+            const novaData = new Date(Date.now() - (4 - dias) * 24 * 60 * 60 * 1000);
+            await db.query("UPDATE usuarios SET trial_inicio = $1, plano = 'trial' WHERE numero = $2", [novaData, numero]);
+            await enviarMensagem(numero, "trial estendido por " + dias + " dias");
+            return;
+        }
+
+        // RESET
         if (texto && ["resetar", "recomecar", "resetar dados"].includes(texto.toLowerCase().trim())) {
             await db.query("DELETE FROM diario WHERE numero = $1", [numero]);
             await db.query("DELETE FROM usuarios WHERE numero = $1", [numero]);
@@ -216,44 +328,94 @@ if (texto && texto.toLowerCase().startsWith("admin#trial#")) {
             return;
         }
 
+        // USUARIO NOVO
         if (!usuario) {
             usuario = await criarUsuario(numero);
-            await enviarDigitando(numero);
-            await enviarMensagem(numero, "oi sou seu assistente de nutricao pessoal\n\nnos proximos 4 dias vou te ajudar a\n\n1 analisar suas refeicoes por foto\n2 montar um plano alimentar do seu jeito\n3 calcular sua lista de compras pelo seu orcamento\n4 criar um treino baseado na sua rotina\n5 acompanhar suas calorias no dia a dia\n\ne so seguir e ver o resultado\n\ndigitas comecar pra iniciar");
+            await enviarDigitando(numero, 2);
+            await enviarMensagem(numero, "oi sou seu assistente de nutricao\n\nnos proximos 4 dias vou te ajudar a\n\n1 analisar refeicoes por foto ou audio\n2 montar plano alimentar personalizado\n3 calcular lista de compras\n4 criar treino baseado na sua rotina\n5 acompanhar suas calorias\n\ne so seguir e ver o resultado\n\ndigita comecar");
             return;
         }
 
-        if (usuario.estado && usuario.estado !== "ativo") { if (!texto) return; await processarOnboarding(numero, usuario, texto); return; }
+        // ONBOARDING
+        if (usuario.estado && usuario.estado !== "ativo") {
+            if (!texto) return;
+            await processarOnboarding(numero, usuario, texto);
+            return;
+        }
 
+        // TRIAL EXPIRADO
+        if (!verificarTrialAtivo(usuario)) {
+            await enviarDigitando(numero, 1);
+            await enviarMensagem(numero, "seu teste encerrou\n\ngostou do resultado\n\ndigita assinar pra continuar");
+            return;
+        }
+
+        // ASSINAR
         if (texto && texto.toLowerCase().trim() === "assinar") {
-            await enviarDigitando(numero);
-            await enviarMensagem(numero, "plano mensal\n\ncom a assinatura voce tem\n\n1 analise ilimitada de fotos\n2 plano alimentar atualizado toda semana\n3 treino progressivo semana a semana\n4 resumo automatico no final do dia\n5 lista de compras detalhada\n6 suporte ilimitado\n\n[LINK DO PAGAMENTO AQUI]\n\naps o pagamento manda o comprovante");
+            await enviarDigitando(numero, 1);
+            await enviarMensagem(numero, "plano mensal\n\n1 analise ilimitada de fotos e audios\n2 plano alimentar semanal\n3 treino progressivo\n4 resumo diario automatico\n5 lista de compras detalhada\n6 suporte ilimitado\n\n[LINK DO PAGAMENTO AQUI]\n\naps pagar manda o comprovante");
             return;
         }
 
-        if (!verificarTrialAtivo(usuario)) { await enviarDigitando(numero); await enviarMensagem(numero, "seu teste de 4 dias encerrou\n\ngostou do que viu\n\ndigita assinar pra continuar"); return; }
+        const diario = await buscarDiarioHoje(numero);
 
+        // AUDIO
+        if (temAudio) {
+            console.log("🎤 Audio recebido...");
+            await enviarDigitando(numero, 3);
+            const mediaResponse = await axios.post("http://localhost:8080/chat/getBase64FromMediaMessage/" + INSTANCE, { message: { key: data.key, message: data.message } }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } }).catch(() => null);
+
+            if (mediaResponse?.data?.base64) {
+                const transcricao = await transcreverAudio(mediaResponse.data.base64, mediaResponse.data.mimetype);
+                if (transcricao) {
+                    console.log("Transcricao:", transcricao);
+                    usuario = await buscarUsuario(numero);
+                    const resposta = await responderTexto(transcricao, usuario, diario);
+                    await enviarMensagem(numero, resposta);
+                    return;
+                }
+            }
+            await enviarMensagem(numero, "nao consegui entender o audio\n\npode digitar ou mandar foto");
+            return;
+        }
+
+        // IMAGEM
         if (temImagem) {
-            console.log("📸 Baixando imagem...");
-            await enviarDigitando(numero);
+            console.log("📸 Imagem recebida...");
+            await enviarDigitando(numero, 3);
             const mediaResponse = await axios.post("http://localhost:8080/chat/getBase64FromMediaMessage/" + INSTANCE, { message: { key: data.key, message: data.message } }, { headers: { apikey: API_KEY, "Content-Type": "application/json" } });
             const base64 = mediaResponse.data.base64;
             const mimeType = mediaResponse.data.mimetype || "image/jpeg";
             usuario = await buscarUsuario(numero);
-            const analise = await analisarImagem(base64, mimeType, usuario);
+            const analise = await analisarImagem(base64, mimeType, usuario, diario);
             await salvarRefeicao(numero, analise.refeicao, analise.calorias, analise.proteina, analise.carboidratos, analise.gordura);
-            const diario = await buscarDiarioHoje(numero);
-            const total = diario.reduce((acc, r) => acc + (r.calorias || 0), 0);
+            const diarioAtualizado = await buscarDiarioHoje(numero);
+            const total = diarioAtualizado.reduce((acc, r) => acc + (r.calorias || 0), 0);
             const restante = Math.max(0, usuario.calorias_diarias - total);
-            await enviarMensagem(numero, analise.mensagem + "\n\nresumo do dia\nconsumido: " + total + " kcal\nmeta: " + usuario.calorias_diarias + " kcal\nrestante: " + restante + " kcal");
+            const macroMsg = "P: " + analise.proteina + "g | C: " + analise.carboidratos + "g | G: " + analise.gordura + "g";
+            await enviarMensagem(numero, analise.mensagem + "\n\n" + macroMsg + "\n\ndia: " + total + "/" + usuario.calorias_diarias + " kcal | falta: " + restante + " kcal");
             return;
         }
 
-        if (texto) { await enviarDigitando(numero); usuario = await buscarUsuario(numero); const resposta = await responderTexto(texto, usuario); await enviarMensagem(numero, resposta); return; }
+        // TEXTO
+        if (texto) {
+            // detecta horario que acordou
+            if (texto.toLowerCase().includes("acordei") || texto.toLowerCase().includes("acordou")) {
+                const horaMatch = texto.match(/(\d{1,2})[h:]/i);
+                if (horaMatch) {
+                    await db.query("UPDATE usuarios SET hora_acordou = $1 WHERE numero = $2", [horaMatch[1] + ":00", numero]);
+                }
+            }
 
-    } catch (error) { console.error("❌ ERRO:", error.response?.data || error.message); }
+            await enviarDigitando(numero, 2);
+            usuario = await buscarUsuario(numero);
+            const resposta = await responderTexto(texto, usuario, diario);
+            await enviarMensagem(numero, resposta);
+            return;
+        }
+
+    } catch (error) { console.error("ERRO:", error.response?.data || error.message); }
 });
 
 app.get("/", (req, res) => res.send("NutriBot rodando"));
-app.listen(process.env.PORT || 3000, () => { console.log("✅ NutriBot rodando"); });
-
+app.listen(process.env.PORT || 3000, () => { console.log("NutriBot rodando"); });
